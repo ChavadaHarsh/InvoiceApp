@@ -1,0 +1,15 @@
+{
+  "name": "gst-desktop-app",
+  "version": "1.0.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm start --prefix backend\" \"npm run dev --prefix renderer\" \"electron .\"",
+    "build": "npm run build --prefix renderer",
+    "electron": "npm run build && electron ."
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "concurrently": "^8.2.0"
+  }
+}
+  
