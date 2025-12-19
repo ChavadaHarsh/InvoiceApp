@@ -9,6 +9,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use("/api/auth", authRoutes);
+app.use("/api/companies", require("./routes/company.routes"));
 
 const PORT = 5000;
 app.listen(PORT, () => {

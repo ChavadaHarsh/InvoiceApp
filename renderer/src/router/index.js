@@ -3,6 +3,12 @@ import { authStore } from "@/stores/auth.store";
 
 const routes = [
   {
+    path: "/",
+    redirect: () => {
+      return authStore.isAuthenticated ? "/dashboard" : "/login";
+    },
+  },
+  {
     path: "/login",
     component: () => import("@/pages/auth/Login.vue"),
     meta: { guest: true },
@@ -18,8 +24,13 @@ const routes = [
     meta: { guest: true },
   },
   {
-    path: "/",
+    path: "/dashboard",
     component: () => import("@/pages/dashboard/index.vue"),
+    meta: { requiresAuth: true },
+  },
+  {
+    path: "/companies/create",
+    component: () => import("@/pages/companies/CompanyCreate.vue"),
     meta: { requiresAuth: true },
   },
 ];
@@ -29,17 +40,14 @@ const router = createRouter({
   routes,
 });
 
-// 🔐 ROUTER GUARD
 router.beforeEach((to, from, next) => {
-  // 🔒 Protected route but user not logged in
   if (to.meta.requiresAuth && !authStore.isAuthenticated) {
     next("/login");
     return;
   }
 
-  // 🚫 Guest route but user already logged in
   if (to.meta.guest && authStore.isAuthenticated) {
-    next("/");
+    next("/dashboard");
     return;
   }
 

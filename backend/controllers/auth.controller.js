@@ -168,43 +168,67 @@ exports.logout = (req, res) => {
 /**
  * FORGOT PASSWORD
  */
-exports.forgotPassword = (req, res) => {
-  const { email } = req.body;
 
-  db.get(`SELECT id FROM users WHERE email = ?`, [email], (err, user) => {
-    if (err) {
-      return res.status(500).json({
-        success: false,
-        message: "Database error",
-      });
-    }
+exports.forgotPassword = async (req, res) => {
+  const { email, new_password } = req.body;
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "Email not found",
-      });
-    }
-
-    // Generate secure token
-    const token = crypto.randomBytes(32).toString("hex");
-    const expiry = new Date(Date.now() + 15 * 60 * 1000); // 15 min
-
-    db.run(
-      `
-                UPDATE users
-                SET reset_token = ?, reset_token_expiry = ?
-                WHERE id = ?
-                `,
-      [token, expiry.toISOString(), user.id]
-    );
-
-    return res.json({
-      success: true,
-      message: "Password reset token generated",
-      reset_token: token, // later send via email
+  // Validation
+  if (!email || !new_password) {
+    return res.status(400).json({
+      success: false,
+      message: "Email and new password are required",
     });
-  });
+  }
+
+  try {
+    // Check user
+    db.get(
+      `SELECT id FROM users WHERE email = ?`,
+      [email],
+      async (err, user) => {
+        if (err) {
+          return res.status(500).json({
+            success: false,
+            message: "Database error",
+          });
+        }
+
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: "Email not found",
+          });
+        }
+
+        // Hash new password
+        const hashedPassword = await bcrypt.hash(new_password, 10);
+
+        // Update password
+        db.run(
+          `UPDATE users SET password = ? WHERE id = ?`,
+          [hashedPassword, user.id],
+          function (updateErr) {
+            if (updateErr) {
+              return res.status(500).json({
+                success: false,
+                message: "Failed to update password",
+              });
+            }
+
+            return res.json({
+              success: true,
+              message: "Password updated successfully",
+            });
+          }
+        );
+      }
+    );
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+    });
+  }
 };
 
 /**
