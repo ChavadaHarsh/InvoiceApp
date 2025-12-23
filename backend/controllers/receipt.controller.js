@@ -1,42 +1,29 @@
 const db = require("../config/db");
 
-/* =====================================================
-   CREATE RECEIPT (CUSTOMER PAYMENT)
-===================================================== */
+/* ===============================
+   CREATE RECEIPT
+================================ */
 exports.createReceipt = (req, res) => {
   const {
     company_id,
     party_ledger_id,
     cash_bank_ledger_id,
-
     amount,
     receipt_date,
     voucher_no,
     narration,
-
-    settlements = [], // OPTIONAL [{ invoice_id, amount }]
+    settlements = [],
   } = req.body;
 
   if (!company_id || !party_ledger_id || !cash_bank_ledger_id) {
     return res.status(400).json({ error: "Required fields missing" });
   }
 
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: "Invalid receipt amount" });
-  }
-
-  const finalNarration = narration || "Receipt received";
-
-  /* ===============================
-     1️⃣ DEBIT CASH / BANK
-  ================================ */
   db.run(
     `
-    INSERT INTO ledger_entries (
-      company_id, ledger_id,
-      voucher_type, voucher_no, voucher_date,
-      debit, credit, narration
-    ) VALUES (?, ?, 'receipt', ?, ?, ?, 0, ?)
+    INSERT INTO ledger_entries
+    (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+    VALUES (?, ?, 'receipt', ?, ?, ?, 0, ?)
     `,
     [
       company_id,
@@ -44,76 +31,71 @@ exports.createReceipt = (req, res) => {
       voucher_no,
       receipt_date,
       amount,
-      finalNarration,
+      narration,
     ]
   );
 
-  /* ===============================
-     2️⃣ CREDIT PARTY
-  ================================ */
   db.run(
     `
-    INSERT INTO ledger_entries (
-      company_id, ledger_id,
-      voucher_type, voucher_no, voucher_date,
-      debit, credit, narration
-    ) VALUES (?, ?, 'receipt', ?, ?, 0, ?, ?)
+    INSERT INTO ledger_entries
+    (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+    VALUES (?, ?, 'receipt', ?, ?, 0, ?, ?)
     `,
-    [
-      company_id,
-      party_ledger_id,
-      voucher_no,
-      receipt_date,
-      amount,
-      finalNarration,
-    ]
+    [company_id, party_ledger_id, voucher_no, receipt_date, amount, narration]
   );
 
-  /* ===============================
-     3️⃣ UPDATE LEDGER BALANCES
-  ================================ */
-  // Cash / Bank increases
+  res.json({ success: true });
+};
+
+/* ===============================
+   LIST RECEIPTS  ✅ FIXED
+================================ */
+exports.getReceipts = (req, res) => {
+  const { company_id } = req.query;
+
+  db.all(
+    `
+    SELECT *
+    FROM ledger_entries
+    WHERE company_id = ?
+      AND voucher_type = 'receipt'
+    ORDER BY voucher_date DESC
+    `,
+    [company_id],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    }
+  );
+};
+
+/* ===============================
+   GET RECEIPT BY ID  ✅ FIXED
+================================ */
+exports.getReceiptById = (req, res) => {
+  const { id } = req.params;
+
+  db.get(`SELECT * FROM ledger_entries WHERE id = ?`, [id], (err, row) => {
+    if (err || !row) {
+      return res.status(404).json({ error: "Receipt not found" });
+    }
+    res.json(row);
+  });
+};
+
+/* ===============================
+   CANCEL RECEIPT  ✅ FIXED
+================================ */
+exports.cancelReceipt = (req, res) => {
+  const { id } = req.params;
+
   db.run(
     `
-    UPDATE ledgers
-    SET closing_balance = closing_balance + ?
+    UPDATE ledger_entries
+    SET narration = narration || ' (Cancelled)'
     WHERE id = ?
     `,
-    [amount, cash_bank_ledger_id]
+    [id],
+    () => res.json({ success: true })
   );
-
-  // Party outstanding reduces
-  db.run(
-    `
-    UPDATE ledgers
-    SET closing_balance = closing_balance - ?
-    WHERE id = ?
-    `,
-    [amount, party_ledger_id]
-  );
-
-  /* ===============================
-     4️⃣ INVOICE SETTLEMENT (OPTIONAL)
-  ================================ */
-  settlements.forEach((s) => {
-    db.run(
-      `
-      INSERT INTO invoice_settlements (
-        company_id,
-        invoice_type,
-        invoice_id,
-        voucher_type,
-        voucher_no,
-        amount,
-        settlement_date
-      ) VALUES (?, 'sales', ?, 'receipt', ?, ?, ?)
-      `,
-      [company_id, s.invoice_id, voucher_no, s.amount, receipt_date]
-    );
-  });
-
-  res.json({
-    success: true,
-    message: "Receipt posted successfully",
-  });
 };

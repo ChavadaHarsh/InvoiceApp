@@ -1,24 +1,20 @@
 const db = require("../config/db");
 
 /* =====================================================
-   CREATE PAYMENT (SUPPLIER / EXPENSE)
+   CREATE PAYMENT (SUPPLIER PAYMENT)
 ===================================================== */
 exports.createPayment = (req, res) => {
   const {
     company_id,
-    party_ledger_id, // supplier / expense ledger
-    cash_bank_ledger_id, // cash or bank ledger
-
+    party_ledger_id,
+    cash_bank_ledger_id,
     amount,
     payment_date,
     voucher_no,
     narration,
-
-    settlements = [], // OPTIONAL [{ invoice_id, amount }]
   } = req.body;
 
-  /* ================= VALIDATION ================= */
-  if (!company_id || !cash_bank_ledger_id || !party_ledger_id) {
+  if (!company_id || !party_ledger_id || !cash_bank_ledger_id) {
     return res.status(400).json({ error: "Required fields missing" });
   }
 
@@ -26,97 +22,80 @@ exports.createPayment = (req, res) => {
     return res.status(400).json({ error: "Invalid payment amount" });
   }
 
-  const finalNarration = narration || "Payment made";
+  const note = narration || "Payment made";
 
-  /* ===============================
-     1️⃣ DEBIT PARTY / EXPENSE
-  ================================ */
+  // Dr Party
   db.run(
     `
-    INSERT INTO ledger_entries (
-      company_id, ledger_id,
-      voucher_type, voucher_no, voucher_date,
-      debit, credit, narration
-    ) VALUES (?, ?, 'payment', ?, ?, ?, 0, ?)
+    INSERT INTO ledger_entries
+    (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+    VALUES (?, ?, 'payment', ?, ?, ?, 0, ?)
     `,
-    [
-      company_id,
-      party_ledger_id,
-      voucher_no,
-      payment_date,
-      amount,
-      finalNarration,
-    ]
+    [company_id, party_ledger_id, voucher_no, payment_date, amount, note]
   );
 
-  /* ===============================
-     2️⃣ CREDIT CASH / BANK
-  ================================ */
+  // Cr Cash / Bank
   db.run(
     `
-    INSERT INTO ledger_entries (
-      company_id, ledger_id,
-      voucher_type, voucher_no, voucher_date,
-      debit, credit, narration
-    ) VALUES (?, ?, 'payment', ?, ?, 0, ?, ?)
+    INSERT INTO ledger_entries
+    (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+    VALUES (?, ?, 'payment', ?, ?, 0, ?, ?)
     `,
-    [
-      company_id,
-      cash_bank_ledger_id,
-      voucher_no,
-      payment_date,
-      amount,
-      finalNarration,
-    ]
+    [company_id, cash_bank_ledger_id, voucher_no, payment_date, amount, note]
   );
 
-  /* ===============================
-     3️⃣ UPDATE LEDGER BALANCES
-  ================================ */
+  res.json({ success: true });
+};
 
-  // Supplier / Expense ledger increases (debit)
+/* =====================================================
+   LIST PAYMENTS ✅ FIXED
+===================================================== */
+exports.getPayments = (req, res) => {
+  const { company_id } = req.query;
+
+  db.all(
+    `
+    SELECT *
+    FROM ledger_entries
+    WHERE company_id = ?
+      AND voucher_type = 'payment'
+    ORDER BY voucher_date DESC
+    `,
+    [company_id],
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    }
+  );
+};
+
+/* =====================================================
+   GET PAYMENT BY ID ✅ FIXED
+===================================================== */
+exports.getPaymentById = (req, res) => {
+  const { id } = req.params;
+
+  db.get(`SELECT * FROM ledger_entries WHERE id = ?`, [id], (err, row) => {
+    if (err || !row) {
+      return res.status(404).json({ error: "Payment not found" });
+    }
+    res.json(row);
+  });
+};
+
+/* =====================================================
+   CANCEL PAYMENT ✅ FIXED
+===================================================== */
+exports.cancelPayment = (req, res) => {
+  const { id } = req.params;
+
   db.run(
     `
-    UPDATE ledgers
-    SET closing_balance = closing_balance + ?
+    UPDATE ledger_entries
+    SET narration = narration || ' (Cancelled)'
     WHERE id = ?
     `,
-    [amount, party_ledger_id]
+    [id],
+    () => res.json({ success: true })
   );
-
-  // Cash / Bank decreases
-  db.run(
-    `
-    UPDATE ledgers
-    SET closing_balance = closing_balance - ?
-    WHERE id = ?
-    `,
-    [amount, cash_bank_ledger_id]
-  );
-
-  /* ===============================
-     4️⃣ INVOICE SETTLEMENT (OPTIONAL)
-     (For Purchase Bills)
-  ================================ */
-  settlements.forEach((s) => {
-    db.run(
-      `
-      INSERT INTO invoice_settlements (
-        company_id,
-        invoice_type,
-        invoice_id,
-        voucher_type,
-        voucher_no,
-        amount,
-        settlement_date
-      ) VALUES (?, 'purchase', ?, 'payment', ?, ?, ?)
-      `,
-      [company_id, s.invoice_id, voucher_no, s.amount, payment_date]
-    );
-  });
-
-  res.json({
-    success: true,
-    message: "Payment posted successfully",
-  });
 };

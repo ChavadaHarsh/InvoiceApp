@@ -17,3 +17,4 @@ CREATE TABLE IF NOT EXISTS invoice_settlements (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 `);
+module.exports = db;

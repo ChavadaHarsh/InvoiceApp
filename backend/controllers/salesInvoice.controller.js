@@ -1,7 +1,7 @@
 const db = require("../config/db");
 
 /* =====================================================
-   CREATE SALES INVOICE (CASH / CREDIT + AUTO LEDGER)
+   CREATE SALES INVOICE (CASH / CREDIT)
 ===================================================== */
 exports.createSalesInvoice = (req, res) => {
   const {
@@ -9,18 +9,19 @@ exports.createSalesInvoice = (req, res) => {
     party_id,
     invoice_no,
     invoice_date,
-    invoice_type, // cash / credit
+    invoice_type,
 
     sales_ledger_id,
     output_gst_ledger_id,
-    cash_ledger_id, // required for cash sale
+    cash_ledger_id,
 
     invoice_discount = 0,
     extra_charges = 0,
     round_off = 0,
-
     items,
   } = req.body;
+
+  const fy = req.financial_year;
 
   if (!items || !items.length) {
     return res.status(400).json({ error: "Invoice items required" });
@@ -30,183 +31,146 @@ exports.createSalesInvoice = (req, res) => {
     return res.status(400).json({ error: "Party required for credit invoice" });
   }
 
-  let gross_amount = 0;
-  let item_discount = 0;
-  let gst_amount = 0;
+  let gross = 0,
+    itemDisc = 0,
+    gst = 0;
 
-  items.forEach((item) => {
-    gross_amount += Number(item.gross_amount);
-    item_discount += Number(item.discount_amount || 0);
-    gst_amount += Number(item.gst_amount);
+  items.forEach((i) => {
+    gross += Number(i.gross_amount);
+    itemDisc += Number(i.discount_amount || 0);
+    gst += Number(i.gst_amount);
   });
 
-  const taxable_amount =
-    gross_amount - item_discount - Number(invoice_discount);
+  const taxable = gross - itemDisc - Number(invoice_discount);
+  const total = taxable + gst + Number(extra_charges) + Number(round_off);
 
-  const total_amount =
-    taxable_amount + gst_amount + Number(extra_charges) + Number(round_off);
+  const debitLedger = invoice_type === "credit" ? party_id : cash_ledger_id;
 
-  /* ================= INSERT INVOICE ================= */
-  db.run(
-    `
-    INSERT INTO sales_invoices (
-      company_id, party_id,
-      invoice_no, invoice_date, invoice_type,
-      gross_amount, item_discount, invoice_discount,
-      taxable_amount, gst_amount,
-      extra_charges, round_off,
-      total_amount
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-    [
-      company_id,
-      invoice_type === "credit" ? party_id : null,
-      invoice_no,
-      invoice_date,
-      invoice_type,
-      gross_amount,
-      item_discount,
-      invoice_discount,
-      taxable_amount,
-      gst_amount,
-      extra_charges,
-      round_off,
-      total_amount,
-    ],
-    function (err) {
-      if (err) return res.status(400).json({ error: err.message });
+  db.serialize(() => {
+    db.run("BEGIN TRANSACTION");
 
-      const invoiceId = this.lastID;
+    db.run(
+      `
+      INSERT INTO sales_invoices (
+        company_id, financial_year_id, party_id,
+        invoice_no, invoice_date, invoice_type,
+        gross_amount, item_discount, invoice_discount,
+        taxable_amount, gst_amount,
+        extra_charges, round_off, total_amount,
+        status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+      `,
+      [
+        company_id,
+        fy.id,
+        invoice_type === "credit" ? party_id : null,
+        invoice_no,
+        invoice_date,
+        invoice_type,
+        gross,
+        itemDisc,
+        invoice_discount,
+        taxable,
+        gst,
+        extra_charges,
+        round_off,
+        total,
+      ],
+      function (err) {
+        if (err) {
+          db.run("ROLLBACK");
+          return res.status(400).json({ error: err.message });
+        }
 
-      /* ========== ITEMS + STOCK ========== */
-      items.forEach((item) => {
+        const invoiceId = this.lastID;
+
+        for (const i of items) {
+          db.run(
+            `
+            INSERT INTO sales_invoice_items (
+              invoice_id, product_id,
+              qty, rate,
+              gross_amount,
+              discount_percent, discount_amount,
+              taxable_amount,
+              gst_rate, gst_amount,
+              total_amount
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            [
+              invoiceId,
+              i.product_id,
+              i.qty,
+              i.rate,
+              i.gross_amount,
+              i.discount_percent || 0,
+              i.discount_amount || 0,
+              i.taxable_amount,
+              i.gst_rate,
+              i.gst_amount,
+              i.total_amount,
+            ]
+          );
+
+          db.run(
+            `UPDATE products SET opening_stock = opening_stock - ? WHERE id = ?`,
+            [i.qty, i.product_id]
+          );
+        }
+
+        // Dr Party / Cash
         db.run(
           `
-          INSERT INTO sales_invoice_items (
-            invoice_id, product_id,
-            qty, rate,
-            gross_amount,
-            discount_percent, discount_amount,
-            taxable_amount,
-            gst_rate, gst_amount,
-            total_amount
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO ledger_entries
+          (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+          VALUES (?, ?, 'sales', ?, ?, ?, 0, 'Sales Invoice')
           `,
-          [
-            invoiceId,
-            item.product_id,
-            item.qty,
-            item.rate,
-            item.gross_amount,
-            item.discount_percent || 0,
-            item.discount_amount || 0,
-            item.taxable_amount,
-            item.gst_rate,
-            item.gst_amount,
-            item.total_amount,
-          ]
+          [company_id, debitLedger, invoice_no, invoice_date, total]
         );
 
-        // reduce stock
-        db.run(
-          `UPDATE products SET opening_stock = opening_stock - ? WHERE id = ?`,
-          [item.qty, item.product_id]
-        );
-      });
-
-      /* ================= LEDGER POSTING ================= */
-
-      // 1️⃣ Debit Party or Cash
-      const debitLedger = invoice_type === "credit" ? party_id : cash_ledger_id;
-
-      db.run(
-        `
-        INSERT INTO ledger_entries (
-          company_id, ledger_id,
-          voucher_type, voucher_no, voucher_date,
-          debit, credit, narration
-        ) VALUES (?, ?, 'sales', ?, ?, ?, 0, ?)
-        `,
-        [
-          company_id,
-          debitLedger,
-          invoice_no,
-          invoice_date,
-          total_amount,
-          "Sales Invoice",
-        ]
-      );
-
-      // 2️⃣ Credit Sales
-      db.run(
-        `
-        INSERT INTO ledger_entries (
-          company_id, ledger_id,
-          voucher_type, voucher_no, voucher_date,
-          debit, credit, narration
-        ) VALUES (?, ?, 'sales', ?, ?, 0, ?, ?)
-        `,
-        [
-          company_id,
-          sales_ledger_id,
-          invoice_no,
-          invoice_date,
-          taxable_amount,
-          "Sales Account",
-        ]
-      );
-
-      // 3️⃣ Credit Output GST
-      if (gst_amount > 0) {
+        // Cr Sales
         db.run(
           `
-          INSERT INTO ledger_entries (
-            company_id, ledger_id,
-            voucher_type, voucher_no, voucher_date,
-            debit, credit, narration
-          ) VALUES (?, ?, 'sales', ?, ?, 0, ?, ?)
+          INSERT INTO ledger_entries
+          (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+          VALUES (?, ?, 'sales', ?, ?, 0, ?, 'Sales')
           `,
-          [
-            company_id,
-            output_gst_ledger_id,
-            invoice_no,
-            invoice_date,
-            gst_amount,
-            "Output GST",
-          ]
+          [company_id, sales_ledger_id, invoice_no, invoice_date, taxable]
         );
-      }
 
-      /* ================= UPDATE LEDGER BALANCES ================= */
+        // Cr Output GST
+        if (gst > 0) {
+          db.run(
+            `
+            INSERT INTO ledger_entries
+            (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+            VALUES (?, ?, 'sales', ?, ?, 0, ?, 'Output GST')
+            `,
+            [company_id, output_gst_ledger_id, invoice_no, invoice_date, gst]
+          );
+        }
 
-      // Debit ledger
-      db.run(
-        `UPDATE ledgers SET closing_balance = closing_balance + ? WHERE id = ?`,
-        [total_amount, debitLedger]
-      );
-
-      // Sales ledger
-      db.run(
-        `UPDATE ledgers SET closing_balance = closing_balance - ? WHERE id = ?`,
-        [taxable_amount, sales_ledger_id]
-      );
-
-      // GST ledger
-      if (gst_amount > 0) {
+        // Ledger balances
+        db.run(
+          `UPDATE ledgers SET closing_balance = closing_balance + ? WHERE id = ?`,
+          [total, debitLedger]
+        );
         db.run(
           `UPDATE ledgers SET closing_balance = closing_balance - ? WHERE id = ?`,
-          [gst_amount, output_gst_ledger_id]
+          [taxable, sales_ledger_id]
         );
-      }
+        if (gst > 0) {
+          db.run(
+            `UPDATE ledgers SET closing_balance = closing_balance - ? WHERE id = ?`,
+            [gst, output_gst_ledger_id]
+          );
+        }
 
-      res.json({
-        success: true,
-        invoice_id: invoiceId,
-        invoice_type,
-        total_amount,
-      });
-    }
-  );
+        db.run("COMMIT");
+        res.json({ success: true, invoice_id: invoiceId, total_amount: total });
+      }
+    );
+  });
 };
 
 /* =====================================================
@@ -217,9 +181,7 @@ exports.getSalesInvoices = (req, res) => {
 
   db.all(
     `
-    SELECT 
-      si.*,
-      p.name AS party_name
+    SELECT si.*, p.name AS party_name
     FROM sales_invoices si
     LEFT JOIN parties p ON p.id = si.party_id
     WHERE si.company_id = ?
@@ -234,15 +196,14 @@ exports.getSalesInvoices = (req, res) => {
 };
 
 /* =====================================================
-   GET SALES INVOICE BY ID (WITH ITEMS)
+   GET SALES INVOICE BY ID
 ===================================================== */
 exports.getSalesInvoiceById = (req, res) => {
   const { id } = req.params;
 
   db.get(`SELECT * FROM sales_invoices WHERE id = ?`, [id], (err, invoice) => {
-    if (err || !invoice) {
+    if (err || !invoice)
       return res.status(404).json({ error: "Invoice not found" });
-    }
 
     db.all(
       `
@@ -254,107 +215,86 @@ exports.getSalesInvoiceById = (req, res) => {
       [id],
       (err, items) => {
         if (err) return res.status(500).json({ error: err.message });
-
-        res.json({
-          ...invoice,
-          items,
-        });
+        res.json({ ...invoice, items });
       }
     );
   });
 };
 
+/* =====================================================
+   CANCEL SALES INVOICE
+===================================================== */
 exports.cancelSalesInvoice = (req, res) => {
   const { id } = req.params;
 
-  // 1️⃣ Fetch invoice
-  db.get(`SELECT * FROM sales_invoices WHERE id = ?`, [id], (err, invoice) => {
-    if (err || !invoice) {
-      return res.status(404).json({ error: "Invoice not found" });
-    }
+  db.serialize(() => {
+    db.run("BEGIN TRANSACTION");
 
-    if (invoice.status === "cancelled") {
-      return res.status(400).json({ error: "Invoice already cancelled" });
-    }
-
-    // 2️⃣ Restore stock
-    db.all(
-      `SELECT * FROM sales_invoice_items WHERE invoice_id = ?`,
+    db.get(
+      `SELECT * FROM sales_invoices WHERE id = ?`,
       [id],
-      (err, items) => {
-        if (err) {
-          return res.status(500).json({ error: err.message });
+      (err, invoice) => {
+        if (err || !invoice) {
+          db.run("ROLLBACK");
+          return res.status(404).json({ error: "Invoice not found" });
         }
 
-        items.forEach((item) => {
-          db.run(
-            `
-              UPDATE products
-              SET opening_stock = opening_stock + ?
-              WHERE id = ?
-              `,
-            [item.qty, item.product_id]
-          );
-        });
-
-        // 3️⃣ Reverse party balance ONLY for credit invoice
-        if (invoice.invoice_type === "credit") {
-          db.run(
-            `
-              UPDATE parties
-              SET closing_balance = closing_balance - ?
-              WHERE id = ?
-              `,
-            [invoice.total_amount, invoice.party_id]
-          );
+        if (invoice.status === "cancelled") {
+          db.run("ROLLBACK");
+          return res.status(400).json({ error: "Already cancelled" });
         }
 
-        // 4️⃣ Reverse ledger entries (DO NOT DELETE – TALLY STYLE)
-        db.run(
-          `
-            INSERT INTO ledger_entries (
-              company_id,
-              ledger_id,
-              voucher_type,
-              voucher_no,
-              voucher_date,
-              debit,
-              credit,
-              narration
-            )
-            SELECT
-              company_id,
-              ledger_id,
-              'sales_cancel',
-              voucher_no,
-              DATE('now'),
-              credit,
-              debit,
-              'Sales Invoice Cancelled'
-            FROM ledger_entries
-            WHERE voucher_no = ?
-              AND voucher_type = 'sales'
-            `,
-          [invoice.invoice_no]
-        );
-
-        // 5️⃣ Mark invoice cancelled
-        db.run(
-          `
-            UPDATE sales_invoices
-            SET status = 'cancelled'
-            WHERE id = ?
-            `,
+        db.all(
+          `SELECT * FROM sales_invoice_items WHERE invoice_id = ?`,
           [id],
-          (err) => {
-            if (err) {
-              return res.status(500).json({ error: err.message });
-            }
-
-            res.json({
-              success: true,
-              message: "Sales invoice cancelled successfully",
+          (err, items) => {
+            items.forEach((i) => {
+              db.run(
+                `UPDATE products SET opening_stock = opening_stock + ? WHERE id = ?`,
+                [i.qty, i.product_id]
+              );
             });
+
+            db.all(
+              `
+              SELECT * FROM ledger_entries
+              WHERE voucher_no = ?
+                AND voucher_type = 'sales'
+              `,
+              [invoice.invoice_no],
+              (err, rows) => {
+                rows.forEach((le) => {
+                  db.run(
+                    `UPDATE ledgers SET closing_balance = closing_balance - ? WHERE id = ?`,
+                    [le.debit - le.credit, le.ledger_id]
+                  );
+
+                  db.run(
+                    `
+                    INSERT INTO ledger_entries
+                    (company_id, ledger_id, voucher_type, voucher_no, voucher_date, debit, credit, narration)
+                    VALUES (?, ?, 'sales_cancel', ?, DATE('now'), ?, ?, 'Sales Cancelled')
+                    `,
+                    [
+                      le.company_id,
+                      le.ledger_id,
+                      le.voucher_no,
+                      le.credit,
+                      le.debit,
+                    ]
+                  );
+                });
+
+                db.run(
+                  `UPDATE sales_invoices SET status = 'cancelled' WHERE id = ?`,
+                  [id],
+                  () => {
+                    db.run("COMMIT");
+                    res.json({ success: true });
+                  }
+                );
+              }
+            );
           }
         );
       }

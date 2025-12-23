@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS sales_invoices (
     total_amount REAL NOT NULL,
 
     status TEXT DEFAULT 'active',
-
+financial_year_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 
     UNIQUE (company_id, invoice_no)

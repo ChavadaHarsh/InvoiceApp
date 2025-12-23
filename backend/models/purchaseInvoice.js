@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS purchase_invoices (
     round_off REAL DEFAULT 0,
 
     total_amount REAL NOT NULL,
-
+financial_year_id INTEGER,
     status TEXT DEFAULT 'active',     -- active / partially_returned / returned / cancelled
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 
