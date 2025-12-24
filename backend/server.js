@@ -53,7 +53,6 @@ app.use("/api/reports/cash-book", require("./routes/reports/cashBook.routes"));
 app.use("/api/reports/bank-book", require("./routes/reports/bankBook.routes"));
 app.use("/api/reports/gstr1", require("./routes/reports/gstGstr1.routes"));
 app.use("/api/reports/itc", require("./routes/reports/gstItc.routes"));
-app.use("/api/reports/receipt", require("../routes/receipt.routes"));
 
 /* ===============================
    SERVER START
